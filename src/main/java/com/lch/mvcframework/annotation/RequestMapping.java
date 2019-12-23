@@ -12,7 +12,7 @@ import java.lang.annotation.Target;
  * @author: liuchenhui
  * @create: 2019-12-11 17:58
  **/
-@Target(ElementType.TYPE)
+@Target({ElementType.METHOD, ElementType.TYPE})
 @Documented
 @Retention(RetentionPolicy.RUNTIME)
 public @interface RequestMapping {
@@ -20,10 +20,10 @@ public @interface RequestMapping {
     /**
      * url
      */
-    String value();
+    String value() default "";
 
     /**
      * 请求方法
      */
-    MethodEnum method();
+    MethodEnum method() default MethodEnum.GET;
 }

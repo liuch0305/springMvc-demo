@@ -17,5 +17,5 @@ public @interface Service {
     /**
      * bean的name
      */
-    String value();
+    String value() default "";
 }

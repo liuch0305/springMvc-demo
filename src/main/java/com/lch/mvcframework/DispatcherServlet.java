@@ -2,7 +2,9 @@ package com.lch.mvcframework;
 
 import com.lch.mvcframework.annotation.Autowired;
 import com.lch.mvcframework.annotation.Controller;
+import com.lch.mvcframework.annotation.RequestBody;
 import com.lch.mvcframework.annotation.RequestMapping;
+import com.lch.mvcframework.annotation.RequestParam;
 import com.lch.mvcframework.annotation.Service;
 import com.lch.tomcat.HttpServelt;
 import com.lch.tomcat.exception.ServletException;
@@ -12,9 +14,9 @@ import com.lch.tomcat.http.HttpServletResponse;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.IOException;
-import java.lang.annotation.Annotation;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
+import java.lang.reflect.Parameter;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashMap;
@@ -48,6 +50,23 @@ public class DispatcherServlet extends HttpServelt {
 
 
     @Override
+    protected void init() {
+        log.info("spring context begin init.....");
+        // 获取配置文件
+        doconfig(this.getServletConfig().getInitParameter());
+        // 扫描配置中的包路径
+        doscanner(contextConfig.getProperty(SCAN_PACKAGE));
+        // 初始化所有bean
+        doInitialize();
+        // autowire装配
+        doAutowire();
+        // 初始化hadlerMapping
+        initHandlerMapping();
+
+        log.info("spring context init success!");
+    }
+
+    @Override
     protected void doGet(HttpServletRequest req, HttpServletResponse resp) throws ServletException, IOException {
         doPost(req, resp);
     }
@@ -67,29 +86,131 @@ public class DispatcherServlet extends HttpServelt {
         Handler handler = getHandler(req);
         if (handler == null) {
             resp.sendError(404, "404 Not Found!!!");
+            return;
         }
 
+        String method = req.getMethod();
+        String httpMethod = handler.getHttpMethod();
+        if (method != null && !method.equals(httpMethod)) {
+            resp.sendError(500, "only support " + httpMethod);
+            return;
+        }
+        Class<?>[] paramTypes = handler.getParamTypes();
         Map<String, Integer> paramIndexMapping = handler.getParamIndexMapping();
-        Class<?>[] paramTypes = handler.paramTypes;
-
-
+        Object[] paramObjs = new Object[paramTypes.length];
+        for (Map.Entry<String, Integer> entry : paramIndexMapping.entrySet()) {
+            String key = entry.getKey();
+            Integer value = entry.getValue();
+            Class<?> paramType = paramTypes[value];
+            if (paramType == HttpServletRequest.class) {
+                paramObjs[value] = req;
+                continue;
+            }
+            if (paramType == HttpServletResponse.class) {
+                paramObjs[value] = resp;
+                continue;
+            }
+            paramObjs[value] = convert(req.getParameter(key), paramType);
+        }
+        try {
+            resp.write(handler.getMethod().invoke(handler.getObject(), paramObjs));
+        } catch (Exception e) {
+            log.error("服务异常", e);
+            resp.sendError(500, "服务异常" + e.getStackTrace());
+        }
     }
 
-    @Override
-    protected void init() {
-        log.info("spring context begin init.....");
-        // 获取配置文件
-        doconfig(this.getServletConfig().getInitParameter());
-        // 扫描配置中的包路径
-        doscanner(contextConfig.getProperty(SCAN_PACKAGE));
-        // 初始化所有bean
-        doInitialize();
-        // autowire装配
-        doAutowire();
-        // 初始化hadlerMapping
-        initHandlerMapping();
+    private void doconfig(String initparam) {
+        String path = this.getClass().getResource("/").getPath();
+        FileInputStream fileInputStream = null;
+        try {
+            fileInputStream = new FileInputStream(path + "/" + initparam);
+            contextConfig.load(new FileInputStream(path + "/" + initparam));
+        } catch (IOException e) {
+            log.error("read application.properties fail", e);
+        } finally {
+            if (fileInputStream != null) {
+                try {
+                    fileInputStream.close();
+                } catch (IOException e) {
+                    e.printStackTrace();
+                }
+            }
+        }
+    }
 
-        log.info("spring context init success!");
+    private void doscanner(String packageName) {
+        String classpath = packageName.replaceAll("\\.", "/");
+        String path = this.getClass().getResource("/").getPath() + classpath;
+        File listFile = new File(path);
+        for (File file : listFile.listFiles()) {
+            if (file.isDirectory()) {
+                doscanner(packageName + "." + file.getName());
+            } else {
+                if (!file.getName().endsWith(".class")) {
+                    continue;
+                }
+                String clazzName = (packageName + "." + file.getName()).replaceAll(".class", "");
+                clazzList.add(clazzName);
+            }
+        }
+    }
+
+    private void doInitialize() {
+        if (clazzList.isEmpty()) {
+            return;
+        }
+        for (String clazzName : clazzList) {
+            try {
+                Class<?> clazz = Class.forName(clazzName);
+                if (clazz.isAnnotationPresent(Controller.class)) {
+                    iocMap.put(toLowChar(clazz.getSimpleName()), clazz.newInstance());
+                } else if (clazz.isAnnotationPresent(Service.class)) {
+                    Object object = clazz.newInstance();
+                    iocMap.put(toLowChar(clazz.getSimpleName()), object);
+                    Service service = clazz.getAnnotation(Service.class);
+                    String value = service.value();
+                    if (!"".equals(value.trim())) {
+                        if (iocMap.containsKey(value.trim())) {
+                            throw new Exception("The “" + clazz.getName() + "” is exists!!");
+                        }
+                        iocMap.put(value.trim(), object);
+                    }
+                } else {
+                    continue;
+                }
+            } catch (Exception e) {
+                e.printStackTrace();
+                log.error("Initialize bean named " + clazzName + " fail !");
+            }
+        }
+    }
+
+    private void doAutowire() {
+        if (iocMap.isEmpty()) {
+            return;
+        }
+        for (Map.Entry<String, Object> entry : iocMap.entrySet()) {
+            Object beanInstance = entry.getValue();
+            Field[] declaredFields = beanInstance.getClass().getDeclaredFields();
+            for (Field declaredField : declaredFields) {
+                if (declaredField.isAnnotationPresent(Autowired.class)) {
+                    Autowired autowired = declaredField.getAnnotation(Autowired.class);
+                    String beanName = autowired.value();
+                    if ("".equals(beanName.trim())) {
+                        beanName = declaredField.getType().getName();
+                        String[] split = beanName.split("\\.");
+                        beanName = toLowChar(split[split.length - 1]);
+                    }
+                    declaredField.setAccessible(true);
+                    try {
+                        declaredField.set(beanInstance, iocMap.get(beanName));
+                    } catch (IllegalAccessException e) {
+                        e.printStackTrace();
+                    }
+                }
+            }
+        }
     }
 
     private void initHandlerMapping() {
@@ -118,96 +239,6 @@ public class DispatcherServlet extends HttpServelt {
         }
     }
 
-    private void doAutowire() {
-        if (iocMap.isEmpty()) {
-            return;
-        }
-        for (Map.Entry<String, Object> entry : iocMap.entrySet()) {
-            Object beanInstance = entry.getValue();
-            Field[] declaredFields = beanInstance.getClass().getDeclaredFields();
-            for (Field declaredField : declaredFields) {
-                if (declaredField.isAnnotationPresent(Autowired.class)) {
-                    Autowired autowired = declaredField.getAnnotation(Autowired.class);
-                    String beanName = autowired.value();
-                    if ("".equals(beanName.trim())) {
-                        beanName = declaredField.getType().getName();
-                    }
-                    declaredField.setAccessible(true);
-                    try {
-                        declaredField.set(beanInstance, iocMap.get(beanName));
-                    } catch (IllegalAccessException e) {
-                        e.printStackTrace();
-                    }
-                }
-            }
-        }
-    }
-
-    private void doInitialize() {
-        if (clazzList.isEmpty()) {
-            return;
-        }
-        for (String clazzName : clazzList) {
-            try {
-                Class<?> clazz = Class.forName(clazzName);
-                if (clazz.isAnnotationPresent(Controller.class)) {
-                    iocMap.put(toLowChar(clazzName), clazz.newInstance());
-                } else if (clazz.isAnnotationPresent(Service.class)) {
-                    Object object = clazz.newInstance();
-                    iocMap.put(toLowChar(clazzName), object);
-                    Service service = clazz.getAnnotation(Service.class);
-                    String value = service.value();
-                    if (!"".equals(value.trim())) {
-                        if (iocMap.containsKey(value.trim())) {
-                            throw new Exception("The “" + clazz.getName() + "” is exists!!");
-                        }
-                        iocMap.put(value.trim(), object);
-                    }
-                } else {
-                    continue;
-                }
-            } catch (Exception e) {
-                e.printStackTrace();
-            }
-        }
-    }
-
-    private void doscanner(String packageName) {
-        String classpath = packageName.replaceAll("\\.", "/");
-        String path = this.getClass().getResource("/").getPath() + classpath;
-        File listFile = new File(path);
-        for (File file : listFile.listFiles()) {
-            if (file.isDirectory()) {
-                doscanner(packageName + file.getName());
-            } else {
-                if (!file.getName().endsWith(".class")) {
-                    continue;
-                }
-                String clazzName = (packageName + "." + file.getName()).replaceAll("\\.", "/");
-                clazzList.add(clazzName);
-            }
-        }
-    }
-
-    private void doconfig(String initparam) {
-        String path = this.getClass().getResource("/").getPath();
-        FileInputStream fileInputStream = null;
-        try {
-            fileInputStream = new FileInputStream(path + "/" + initparam);
-            contextConfig.load(new FileInputStream(path + "/" + initparam));
-        } catch (IOException e) {
-            log.error("read application.properties fail", e);
-        } finally {
-            if (fileInputStream != null) {
-                try {
-                    fileInputStream.close();
-                } catch (IOException e) {
-                    e.printStackTrace();
-                }
-            }
-        }
-    }
-
     private String toLowChar(String clazz) {
         char[] chars = clazz.toCharArray();
         chars[0] += 32;
@@ -226,8 +257,29 @@ public class DispatcherServlet extends HttpServelt {
         return null;
     }
 
+    // 将string装换为对应参数
+    private Object convert(String parameter, Class<?> paramType) throws Exception {
+        if (paramType == String.class) {
+            return parameter;
+        } else if (paramType == Integer.class) {
+            try {
+                return Integer.parseInt(parameter);
+            } catch (Exception e) {
+                throw new Exception("String can not canvert to Integer");
+            }
+        } else if (paramType == Double.class) {
+            try {
+                Integer.parseInt(parameter);
+            } catch (Exception e) {
+                throw new Exception("String can not canvert to Integer");
+            }
+        }
+        throw new Exception(paramType.getName() + "is not support");
+    }
+
     @Data
     class Handler {
+
         private String httpMethod;
         private Pattern pattern;
         private Method method;
@@ -248,7 +300,22 @@ public class DispatcherServlet extends HttpServelt {
 
         private Map<String, Integer> putParamIndexMapping(Method method) {
             Map<String, Integer> map = new HashMap<>();
-            Annotation[][] parameterAnnotations = method.getParameterAnnotations();
+
+            Parameter[] parameters = method.getParameters();
+            for (int i = 0; i < parameters.length; i++) {
+                Parameter parameter = parameters[i];
+                String name = parameter.getName();
+                map.put(name, i);
+                RequestParam requestParam = parameter.getAnnotation(RequestParam.class);
+                if (requestParam != null) {
+                    String value = requestParam.value();
+                    map.put(value, i);
+                }
+                RequestBody requestBody = parameter.getAnnotation(RequestBody.class);
+                if (requestBody != null) {
+                    // TODO: 2019-12-20 liuchenhui 从body中取参数
+                }
+            }
             return map;
         }
     }

@@ -17,5 +17,5 @@ public @interface Controller {
     /**
      * 请求url
      */
-    String value();
+    String value() default "";
 }

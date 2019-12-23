@@ -11,6 +11,8 @@
     <properties>
         <!-- dependency versions -->
         <servlet.api.version>2.4</servlet.api.version>
+        <!--   本地jdk8的安装目录     -->
+        <JAVA_HOME8>/Library/Java/JavaVirtualMachines/jdk1.8.0_131.jdk/Contents/Home</JAVA_HOME8>
     </properties>
 
 
@@ -32,6 +34,16 @@
                 <configuration>
                     <source>8</source>
                     <target>8</target>
+                    <verbose>true</verbose>
+                    <fork>true</fork>
+                    <executable>${JAVA_HOME8}/bin/javac</executable>
+                    <compilerArgs>
+                        <!-- 指定maven-compiler-plugin采用jdk的javac编译，并添加-parameters参数
+                         可以把形参名字编译到class文件中，方便参数匹配-->
+                        <!-- spring-mvc执行3中形式的参数匹配，这是其中一种，另外一种偷懒不支持了
+                         其中一种通过字节码，还有一种通过加@RequestParam指定形参名字-->
+                        <arg>-parameters</arg>
+                    </compilerArgs>
                 </configuration>
             </plugin>
             <plugin>
